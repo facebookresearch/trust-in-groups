@@ -1,0 +1,720 @@
+---
+# Copyright (c) Facebook, Inc. and its affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+#
+title: Reproducing "When Do People Trust Their Social Groups?"
+output: html_document
+---
+
+```{r install_and_load_packages, echo=FALSE}
+# install.packages(c(
+#   'tidyverse',
+#   'knitr',
+#   'kableExtra',
+#   'jtools',
+#   'skimr',
+#   'stargazer',
+#   'randomForest',
+#   'caret',
+#   'pROC',
+#   'h2o',
+#   'miscTools',
+#   'huxtable',
+#   'purrr'))
+library(tidyverse)
+library(knitr)
+library(kableExtra)
+library(jtools)
+library(skimr)
+library(stargazer)
+library(randomForest)
+library(caret)
+library(pROC)
+library(h2o)
+library(miscTools)
+library(purrr)
+knitr::opts_chunk$set(
+  echo=TRUE,
+  cache=TRUE,
+  fig.cap=NULL
+)
+for (package in c('ggplot2')) {
+  suppressPackageStartupMessages(library(package, character.only=TRUE))
+}
+ggplot2::theme_set(theme_minimal())
+```
+
+# Introduction
+
+This notebook provides the code necessary to reproduce the 2019 CHI publication "When Do People Trust Their Social Groups?"[^1]. Note that we offer data definition and code but cannot provide the actual data due to privacy and legal reasons. Nonetheless, most of the features we focused on can be generalized to other platforms. The modelling framework can be adapted to new contexts.
+
+[^1]: Xiao Ma, Justin Cheng, Shankar Iyer, Mor Naaman. 2019. When Do People Trust Their Social Groups? In CHI Conference on Human Factors in Computing Systems Proceedings (CHI 2019), May 4–9, 2019, Glasgow, Scotland UK. ACM, New York, NY, USA, 13 pages. <https://doi.org/10.1145/3290605.3300297>
+
+There the following sections in this notebook:
+
+1. Data definition
+2. Individual differences and trust
+3. Group differences and trust
+4. Predicting trust in groups
+5. Group outcomes
+<!-- 6. Plotting -->
+
+# Data Definition
+
+Section 3 (Methods) of the paper details our methodology. It is recommended that you read the methods section first before proceeding to read the code.
+
+Our dependent variable is trust in group composite score. Trust in groups was measured in our survey across four dimensions: care, reliability, integrity and risk taking. As shown in Table 2 in the paper, these dimensions of trust in groups are highly correlated (Cronbach’s alpha 0.86). Thus, we defined a composite “trust in groups” score as the mean of all four dimensions, and report findings with respect to this composite score.
+
+Section 4 (Results) of the paper describes the features we used to predict trust in group. We provide the full feature variables and definitions below.
+
+```{r data_definition_table, cache=TRUE, results='asis', warning=FALSE}
+
+trust_in_group <- c("t1_care", 
+                    "t2_reliability",
+                    "t3_integrity",
+                    "t4_risk_aversion")
+
+demographics <- c("age", 
+                  "gender")
+
+general_attitudes_towards_others <- c("g_trust", 
+                                      "g_risk_attitude",                                    
+                                      "g_social_support",
+                                      "g_in_group_loyalty")
+
+basic_properties <- c("num_activated_members_log",
+                      "public_group",
+                      "group_tenure_years_log",
+                      "num_admins_log",
+                      "num_moderators_log")
+
+category <- c("close_friends_family", 
+              "education_work",
+              "interest",
+              "identity",
+              "local")
+
+activity <- c("total_ts_per_day_per_member_log",  
+              "user_ts_per_day_log",
+              "ga_num_posts_per_member_log",
+              "ga_num_comments_or_likes_per_member_log",
+              "ugpa_num_posts_log",
+              "ugpa_num_comments_or_likes_log")
+
+homogeneity <- c("group_gender_entropy",
+                 "age_sd",
+                 "homophily_distance")
+
+structural <- c("group_density",
+                "average_clustering",
+                "user_degree_centrality",
+                "X5_core_count",
+                "avg_mutual_friend_cnt_log")
+
+group_outcomes <- c("member_grew_more_than_1_pct",
+                    "num_ties_minus_ego_grew_more_than_1_pct",
+                    "ego_ties_grew_more_than_1_pct")
+
+data_definition <- matrix(c(
+# Trust in Group
+  "t1_care", "Trust in group dimension 1, care; 'Other members of the group care about my well-being.'",
+  "t2_reliability", "Trust in group dimension 2, reliability; 'Other members of this group can be relied upon to do what they say they will do.'",
+  "t3_integrity", "Trust in group dimension 3, integrity; 'Other members of this group are honest.'",
+  "t4_risk_aversion", "Trust in group dimension 4, risk taking; 'I feel comfortable sharing my thoughts in this group.'",
+  "trust_avg", "Average trust in group score across four dimensions. Our dependent variable.",
+    
+# Demographics
+  "age", "Self-reported age of the participant.",
+  "gender", "Self-reported gender of the participant.",
+
+# General Attitudes Towards Others
+  "g_trust", "Disposition to trust; 'Most people can be trusted.'",
+  "g_social_support", "General social support; 'There are people in my life who give me support and encouragement.'",
+  "g_risk_attitude", "General risk attitude; 'I’m willing to take risks.'",
+  "g_in_group_loyalty", "General in-group loyalty; 'I would describe myself as a “team player”.'",
+
+# Basic Properties
+  "num_activated_members_log", "Group size (number of members in the group) on log scale",
+  "public_group", "Group membership privacy policy transformed. If group's membership policy is public, the variable is True; if closed or secret, False",
+  "group_tenure_years_log", "How many years the group has existed on log scale",
+  "num_group_admin_log", "The number of group administrators on log scale",
+  "num_group_moderator_log", "The number of group moderators on log scale",
+
+# Category  
+  "close_friends_family", "Binary variable: 1 if the group was tagged by the participant as belonging to this category; 0 if not. This group category is 'Friends & Family: e.g., close friends, extended family'",
+  "education_work", "Same as above; 'Education & work: e.g., college, job, professional'",
+  "interest", "Same as above; 'Interest-Based: e.g., hobby, book club, sports'",
+  "identity", "Same as above; 'Identity-Based: e.g., lifestyle, health, faith, parenting'",
+  "local", "Same as above; 'Location-Based: e.g., neighborhood or local organization'",
+
+# Activity
+  "total_ts_per_day_per_member_log", "Group-level time spent per day in the last 28 days per member on log scale",
+  "user_ts_per_day_log", "Participant-group-pair level time spent per day in the last 28 days on log scale",
+  "ga_num_posts_per_member_log", "Group-level number of posts per member in the last 28 days on log scale",
+  "ga_num_comments_or_likes_per_member_log","Group-level number of comments or likes per member in the last 28 days on log scale",
+  "ugpa_num_posts_log", "Participant-group-pair level number of posts in the last 28 days on log scale",
+  "ugpa_num_comments_or_likes_log", "Participant-group-pair level number of comments or likes in the last 28 days on log scale",
+
+# Homogeneity
+  "group_gender_entropy", "The entropy of the gender of group members",
+  "age_sd","The standard deviation of the ages of group members",
+  "homophily_distance","Similarity between participant and group average. Detailed definition also available in 'Homogeneity and homophily' section of the paper.",
+
+# Structural
+  "group_density", "The number of friendships in the entire group friendship graph divided by the number of possible combinations",
+  "average_clustering", "The average local clustering coefficient in the group membership graph, which measures what proportion of an individual’s friends also know one another",
+  "user_degree_centrality", "The number of friends a participant has in the group, normalized by group size",
+  "X5_core_count", "Cliquishness of participant’s friends in the group",
+  "avg_mutual_friend_cnt_log", "The mean number of mutual friends between participant and group members",
+
+# Group Outcomes
+  "member_grew_more_than_1_pct", "True if the percentage change in group size grew by more than 1%",
+  "num_ties_minus_ego_grew_more_than_1_pct", "True if the percentage change in new tie formation among other members of the group grew by more than 1%",
+  "ego_ties_grew_more_than_1_pct", "True if the percentage change in new tie formation by the survey participant in the group grew by more than 1%"
+  ),
+  ncol=2, 
+  byrow=TRUE
+)
+
+colnames(data_definition) <- c(
+  'Variable',
+  'Definition'
+)
+
+dt <- data.frame(data_definition)
+
+kable(dt, caption='Data Definition') %>%
+  kable_styling(bootstrap_options = c("striped", "hover")) %>%
+  group_rows("Trust in group", 1, 5) %>%  
+  group_rows("Demographics", 6, 7) %>%
+  group_rows("General Attitudes Towards Others", 8, 11) %>%
+  group_rows("Basic Properties", 12, 16) %>%  
+  group_rows("Category", 17, 21) %>%  
+  group_rows("Activity", 22, 27) %>%  
+  group_rows("Homogeneity", 28, 30) %>%  
+  group_rows("Structural", 31, 35) %>%    
+  group_rows("Group Outcomes", 36, 37) %>%     
+  footnote(
+    general=c(
+      "Corresponds to Table 1 and Table 4 in the paper."
+    )
+  )
+```
+
+# Individual Differences and Trust
+
+We start by predicting trust in groups score using individual attitudes as well as demographic information (see in Table 3 in the paper), which prior literature has associated with differences in one’s disposition to trust.
+
+The results from this section are described in "Individual Differences and Trust".
+
+
+```{r read_data}
+# load and transform data
+
+data_path <- '~/group_outcomes_data.csv'
+df <- read.csv(data_path)
+df <- subset(df, trust_groups_complete == 'True')
+
+# helper function to paste formula
+create_formula <- function(y, variables) {
+  return(as.formula(paste(y, " ~ ", paste(variables, collapse=" + "))))
+}
+
+#data transformation
+df$gender <- factor(df$gender, levels=c('2', '1')) # male: 1; female: 2
+df$public_group <- factor(df$privacy_type == 1) # public: 1; closed: 2; secret: 3
+df$num_activated_members_log <- log(df$num_activated_members)
+df$group_tenure_years_log <- log(df$group_tenure_years)
+df$num_admins_log <- log(df$num_admins + 1)
+df$num_moderators_log <- log(df$num_moderators + 1)
+df$avg_mutual_friend_cnt_log <- log(df$avg_mutual_friend_cnt + 1)
+
+df$close_friends_family <- factor(df$close_friends_family)
+df$education_work <- factor(df$education_work)
+df$interest <- factor(df$interest)
+df$identity <- factor(df$identity)
+df$local <- factor(df$local)
+
+# create a combined measure of distance
+df$homophily_distance <- as.integer(!as.logical(df$gender_majority)) +
+  as.integer(abs(df$age_distance_from_group) < 5)
+```
+
+
+The following code reproduces Table 3 in the paper.
+
+```{r individual_differences_models}
+
+f11 <- create_formula('trust_avg', demographics)
+f12 <- create_formula('trust_avg', c(demographics, general_attitudes_towards_others[1]))
+f13 <- create_formula('trust_avg', c(demographics, general_attitudes_towards_others[1:2]))
+f14 <- create_formula('trust_avg', c(demographics, general_attitudes_towards_others[1:3]))
+f15 <- create_formula('trust_avg', c(demographics, general_attitudes_towards_others[1:4]))
+
+fit11 <- lm(f11, df)
+fit12 <- lm(f12, df)
+fit13 <- lm(f13, df)
+fit14 <- lm(f14, df)
+fit15 <- lm(f15, df)
+
+plot_summs(fit11, fit12, fit13, fit14, fit15)
+export_summs(fit11, fit12, fit13, fit14, fit15)
+
+```
+
+
+# Group Differences and Trust
+
+To understand the relationship between group characteristics and trust in groups, we identified five distinct sets of group-level features (see Table 4 in the paper). In this section, we measure the incremental predictive value of each of these sets of group-level features, after controlling for the individual differences discussed above. Here, we use __baseline model__ to refer to a model that only includes the individual differences (Model 5 above).
+
+## Basic Properties
+```{r basic_properties_models}
+
+variables <- c(
+  demographics,
+  general_attitudes_towards_others
+)
+
+f21 <- create_formula('trust_avg', c(variables, basic_properties[1]))
+f22 <- create_formula('trust_avg', c(variables, basic_properties[1:2]))
+f23 <- create_formula('trust_avg', c(variables, basic_properties))
+
+fit21 <- lm(f21, df)
+fit22 <- lm(f22, df)
+fit23 <- lm(f23, df)
+
+plot_summs(fit15, fit21, fit22, fit23)
+export_summs(fit15, fit21, fit22, fit23)
+```
+
+We also found interaction effects between group size and privacy type, and group size and disposition to trust:
+
+```{r basic_properties_models_interaction}
+interactions <- c(
+  "num_activated_members_log:public_group",
+  "num_activated_members_log:g_trust"
+)
+
+variables <- c(
+  demographics,
+  general_attitudes_towards_others,
+  basic_properties,
+  interactions
+)
+
+f21.i <- create_formula('trust_avg', variables)
+fit21.i <- lm(f21.i, df)
+
+plot_summs(fit15, fit23, fit21.i)
+export_summs(fit15, fit23, fit21.i)
+
+```
+
+We conducted a series of t-tests in which we compared the mean difference in the trust composite score between public and private groups above a certain size threshold, starting from 10 in increments of 10. These tests show significant differences between groups larger than the threshold until the threshold exceeds 150 where we no longer observe a significant difference between public and private groups.
+
+```{r test_threshold}
+for(i in 1:16){
+  th <- i * 10
+  small <- subset(
+    df,
+    df$num_activated_members <= th
+  )
+  
+  big <- subset(
+    df,
+    df$num_activated_members > th
+  )
+  
+  nrow(small)
+  nrow(big)
+  
+  summary(small$public_group)
+  summary(big$public_group)
+  
+  small.t <- t.test(subset(small, small$public_group == T)$trust_avg, subset(small, small$public_group == F)$trust_avg)
+  big.t <- t.test(subset(big, big$public_group == T)$trust_avg, subset(big, big$public_group == F)$trust_avg)
+  if(small.t$p.value < 0.05 & big.t$p.value >= 0.045){
+    print(th)
+    print(big.t)
+  }
+}
+```
+
+
+## Category
+
+Participants in our survey labeled groups as belonging to one or more of six categories. Including group category as multiple binary variables to the baseline model significantly improved trust predictions (p<.001), increasing the model’s adjusted R^2^ by 0.05.
+
+```{r category_models}
+
+variables <- c(
+  demographics,
+  general_attitudes_towards_others,
+  category
+)
+
+f31 <- create_formula('trust_avg', variables)
+fit31 <- lm(f31, df)
+
+plot_summs(fit15, fit31)
+export_summs(fit15, fit31)
+```
+
+
+## Activity
+
+We consider both the survey participant’s activity in the group, as well as the overall group activity across all members.
+
+Including activity features (time spent, group activity, and participant in group activity) to the baseline model improves its adjusted R^2^ by 0.04 (p<.001).
+
+```{r activity_models}
+
+variables <- c(
+  demographics,
+  general_attitudes_towards_others
+)
+
+f41 <- create_formula('trust_avg', c(variables, activity[1]))
+f42 <- create_formula('trust_avg', c(variables, activity[2]))
+f43 <- create_formula('trust_avg', c(variables, activity[1:2]))
+f44 <- create_formula('trust_avg', c(variables, activity[3]))
+f45 <- create_formula('trust_avg', c(variables, activity[4]))
+f46 <- create_formula('trust_avg', c(variables, activity[3:4]))
+f47 <- create_formula('trust_avg', c(variables, activity[5]))
+f48 <- create_formula('trust_avg', c(variables, activity[6]))
+f49 <- create_formula('trust_avg', c(variables, activity[5:6]))
+f410 <- create_formula('trust_avg', c(variables, activity))
+
+fit41 <- lm(f41, df)
+fit42 <- lm(f42, df)
+fit43 <- lm(f43, df)
+fit44 <- lm(f44, df)
+fit45 <- lm(f45, df)
+fit46 <- lm(f46, df)
+fit47 <- lm(f47, df)
+fit48 <- lm(f48, df)
+fit49 <- lm(f49, df)
+fit410 <- lm(f410, df)
+
+
+export_summs(fit15, fit41, fit42, fit43, fit44, fit45, fit46, fit47, fit48, fit49, fit410)
+```
+
+## Homogeneity
+
+Trust may also be influenced by homogeneity — how similar people in a group are to each other — and homophily — how similar an individual is to others in the group. As different types of groups may have different demographic compositions, we controlled for group category in this analysis.
+
+Adding homogeneity and homophily features to the baseline model results in small improvement (increased adjusted R^2^ by less than 0.01, p<.001). Nonetheless, we found that both gender and age homogeneity were associated with higher trust.
+
+```{r homogeneity_models}
+variables <- c(
+  demographics,
+  general_attitudes_towards_others,
+  category
+)
+
+f51 <- create_formula('trust_avg', c(variables, homogeneity[1]))
+f52 <- create_formula('trust_avg', c(variables, homogeneity[2]))
+f53 <- create_formula('trust_avg', c(variables, homogeneity[3]))
+f54 <- create_formula('trust_avg', c(variables, homogeneity))
+
+fit51 <- lm(f51, df)
+fit52 <- lm(f52, df)
+fit53 <- lm(f53, df)
+fit54 <- lm(f54, df)
+
+plot_summs(fit31, fit51, fit52, fit53, fit54)
+export_summs(fit31, fit51, fit52, fit53, fit54, scale=TRUE)
+
+```
+
+
+## Structural
+
+To understand how network structure mediates trust, we calculated network features for each group.
+These network features, when added to the baseline model, improves its adjusted R^2^ by 0.10 (p<.001).
+
+```{r structural_models}
+
+variables <- c(
+  demographics,
+  general_attitudes_towards_others
+)
+
+f61 <- create_formula('trust_avg', c(variables, structural[1]))
+f62 <- create_formula('trust_avg', c(variables, structural[2]))
+f63 <- create_formula('trust_avg', c(variables, structural[3]))
+f64 <- create_formula('trust_avg', c(variables, structural[4]))
+f65 <- create_formula('trust_avg', c(variables, structural[5]))
+f66 <- create_formula('trust_avg', c(variables, structural))
+
+fit61 <- lm(f61, df)
+fit62 <- lm(f62, df)
+fit63 <- lm(f63, df)
+fit64 <- lm(f64, df)
+fit65 <- lm(f65, df)
+fit66 <- lm(f66, df)
+
+export_summs(fit15, fit61, fit62, fit63, fit64, fit65, fit66)
+
+```
+
+# Predicting Trust in Groups
+
+Thus far, we have shown how various sets of group characteristics separately contribute to trust, after controlling for individual characteristics.
+
+Here, we examine how these features can together predict the composite trust in groups using random forests.
+
+```{r random_forest}
+# build random forest
+
+features <- c(
+  demographics,
+  general_attitudes_towards_others,
+  basic_properties,
+  category,
+  activity,
+  homogeneity,
+  structural
+)
+
+f <- create_formula('trust_avg', features)
+df <- drop_na(df, c("trust_avg", features))
+df.rf <- df[c("trust_avg", features)]
+
+# split the data to train-test set
+sample.ind <- sample(2, nrow(df.rf), replace=T, prob=c(0.6, 0.4))
+df.dev <- df.rf[sample.ind == 1,]
+df.val <- df.rf[sample.ind == 2,]
+
+```
+
+
+```{r random_forest_parameter_search, eval=FALSE}
+# hyper parameter search
+# turn off eval to run
+y <- "trust_avg"
+x <- features
+
+#h2o.no_progress()
+h2o.init(max_mem_size = "5g", min_mem_size = "1G")
+
+# turn training set into h2o object
+train.h2o <- as.h2o(df.dev)
+
+# hyperparameter grid
+hyper_grid.h2o <- list(
+  ntrees      = seq(200, 500, by = 100),
+  mtries      = seq(1, 24, by = 2)
+#  sample_rate = c(.55, .632, .70, .80)
+)
+
+# build grid search 
+grid <- h2o.grid(
+  algorithm = "randomForest",
+  grid_id = "rf_grid",
+  y = y, 
+  x = features,
+  training_frame = train.h2o,
+  hyper_params = hyper_grid.h2o,
+  search_criteria = list(strategy = "Cartesian")
+  )
+
+# collect the results and sort by our model performance metric of choice
+grid_perf <- h2o.getGrid(
+  grid_id = "rf_grid", 
+  sort_by = "mse", 
+  decreasing = FALSE
+  )
+print(grid_perf)
+```
+
+Train and evaluate the random forest model using out-of-sample data.
+
+```{r random_forest_plot}
+rf <- randomForest(f, df.dev, ntree=500, mtries=5, importance=T)
+plot(rf)
+```
+R-squared:
+```{r}
+(r2 <- rSquared(df.val$trust_avg, df.val$trust_avg - predict(rf, df.val[,features])))
+```
+
+MSE:
+```{r}
+(mse <- mean((df.val$trust_avg - predict(rf, df.val[,features]))^2))
+```
+
+Train and evaluate the random forest model without survey response on individual differences.
+
+```{r random_forest_plot_without_individual_differences}
+features.observe <- c(
+  demographics,
+  basic_properties,
+  category,
+  activity,
+  homogeneity,
+  structural
+)
+
+f.observe <- create_formula('trust_avg', features.observe)
+
+rf.observe <- randomForest(f.observe, df.dev, ntree=500, mtries=5, importance=T)
+plot(rf.observe)
+
+```
+
+R-squared:
+```{r}
+(r2 <- rSquared(df.val$trust_avg, df.val$trust_avg - predict(rf.observe, df.val[,features])))
+```
+
+MSE:
+```{r}
+(mse <- mean((df.val$trust_avg - predict(rf.observe, df.val[,features]))^2))
+```
+
+
+To understand the relative importance of the different feature sets, we ranked all features by how much a random permutation of their values increased the model’s MSE.
+
+Below we also calculate the average increase in MSE for features in each feature set.
+These value will shift a little bit every time we train a new model. But the orders of magnitude should not change.
+```{r random_forest_feature_importance}
+# train on all data
+rf <- randomForest(f, df.rf, ntree=500, mtries=5, importance=T)
+var.imp <- data.frame(importance(rf,
+           type=1))
+# make row names as columns
+var.imp$Variables <- row.names(var.imp)
+var.imp[order(var.imp$X.IncMSE,decreasing = T),]
+
+inmsc <- function(var) {
+  print(mean(subset(var.imp, var.imp$Variables %in% var )$X.IncMSE))
+}
+
+inmsc(demographics)
+inmsc(general_attitudes_towards_others)
+inmsc(c(basic_properties, category))
+inmsc(activity)
+inmsc(homogeneity)
+inmsc(structural)
+
+```
+
+
+# Group Outcomes
+
+Using logistic regression and controlling for basic group properties such as group size, we found that higher trust was associated with a lower likelihood of a group increasing in size (odds ratio -0.87, p<.001); and a higher likelihood that the survey participant would form more new friendships in the group (odds ratio 1.29, p<.001).
+
+```{r outcomes_models}
+
+run_glm <- function(dependent_var) {
+  
+  f <- create_formula(dependent_var, basic_properties)
+  base.glm <- glm(f, family=binomial(link="logit"), data=df)
+  summary(base.glm)
+  exp(cbind(OR = coef(base.glm), confint(base.glm))) 
+  
+  f <- create_formula(dependent_var, c(basic_properties, "trust_avg"))
+  fit.glm <- glm(f, family=binomial(link="logit"), data=df)
+  print(summary(fit.glm))
+  exp(cbind(OR = coef(fit.glm), confint(fit.glm))) 
+
+  avo <- anova(base.glm, fit.glm, test="Chisq")
+}
+
+group_outcomes %>%
+  map(run_glm)
+
+```
+
+
+
+
+<!-- comment out plotting 
+
+# Plotting
+
+
+## Figure 1: The relationship between trust in groups and group size
+
+The following code reproduces Figure 1 in the paper.
+
+```{r interaction}
+
+labeller <- c(
+  "t1_care" =   "Care",
+  "t2_reliability" = "Reliability",
+  "t3_integrity" =  "Integrity",
+  "t4_risk_aversion" = "Risk Taking",
+  "Low" = "Low",
+  "High" = "High"
+)
+
+
+df$high_g_trust <- factor(df$g_trust > 3, labels=c(
+  'Low', 'High'))
+
+flatten_dimensions_trust <- function(col) {
+  tmp <- gather(subset(df, df['high_g_trust'] == col),
+              key="dimension", value="value", trust_in_group)
+
+  tmp$category <- rep(col, nrow(tmp))
+  return(tmp)
+}
+
+df_groups <- 
+  c('Low', 'High') %>%
+    map(flatten_dimensions_trust) %>%
+    map_dfr(~.x)
+
+df_groups$category <- factor(df_groups$category, levels=c('Low', 'High'))
+
+mt <- ggplot(df_groups, aes(log(num_activated_members), linetype=factor(public_group),
+                     value, colour=category)) +
+#  geom_point(size=0.1, alpha=0.1) +
+  geom_smooth(method='lm', fill="lightgrey") +
+  theme_bw() + 
+  xlim(1, 9) +
+  xlab('Group Size (Log)') +
+  ylab('Trust in Group')
+mt <- mt + 
+  facet_grid(.~dimension, labeller = as_labeller(labeller))
+mt <- mt +
+  theme(axis.text = element_text(size = 17, colour="black")) +
+  theme(axis.title = element_text(size = 19)) +
+  theme(legend.text=element_text(size=19)) +
+  theme(legend.title=element_text(size=19)) +
+  theme(strip.text=element_text(size=17)) +
+  theme(legend.position = "bottom") +
+  geom_vline(xintercept=log(150), linetype="dotted", size=0.6, color = "red") +
+  scale_colour_manual(
+  name="Disposition to Trust",
+  values=c("#008aff", "#333333"),
+  guide = guide_legend(override.aes = list(fill="transparent", size=5))
+  ) +
+  scale_linetype_discrete(
+  name="Privacy Type",
+  breaks=c(TRUE, FALSE),
+  labels=c("Public", "Private"),
+  guide = guide_legend(override.aes = list(colour="black", fill="transparent"))
+  )
+
+
+mt
+```
+--> 
+
+
+# Cite As
+
+@inproceedings{ma2019when,
+  title={When do people trust their social groups?},
+  author={Ma, Xiao and Cheng, Justin and Iyer, Shankar and Naaman, Mor},
+  booktitle={CHI Conference on Human Factors in Computing Systems Proceedings (CHI 2019)},
+  year={2019},
+  organization={ACM}
+}
